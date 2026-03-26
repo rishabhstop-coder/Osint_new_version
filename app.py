@@ -2,7 +2,7 @@ import time
 import requests
 import pandas as pd
 import streamlit as st
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from playwright.sync_api import sync_playwright
 
 
