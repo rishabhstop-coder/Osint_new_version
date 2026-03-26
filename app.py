@@ -24,22 +24,29 @@ def bing_search(query):
 
 # -------- FIND PEOPLE --------
 def find_decision_makers(company_name):
-    roles = ["CEO", "Founder", "Owner", "Director", "Manager"]
+    roles = ["CEO", "Founder", "Owner", "Director"]
     results = []
 
     for role in roles:
-        query = f'site:linkedin.com/in "{company_name}" "{role}"'
-        links = bing_search(query)
+        queries = [
+            f'site:linkedin.com/in "{company_name}" "{role}"',
+            f'site:linkedin.com/in "{company_name}" {role}',
+            f'{company_name} {role} linkedin'
+        ]
 
-        for link in links:
-            if "linkedin.com/in" in link:
-                results.append({
-                    "Role": role,
-                    "LinkedIn": link
-                })
+        for query in queries:
+            links = bing_search(query)
 
-        time.sleep(1)
+            for link in links:
+                if "linkedin.com/in" in link:
+                    results.append({
+                        "Role": role,
+                        "LinkedIn": link
+                    })
 
+            time.sleep(1)
+
+    # remove duplicates
     return list({p["LinkedIn"]: p for p in results}.values())
 
 
