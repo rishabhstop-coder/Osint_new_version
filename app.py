@@ -32,20 +32,31 @@ class OSINTEngine:
 
         return {"Name": query.title(), "Domain": None, "Logo": None}
 
-    # -------- 2. ROWS SCRAPER (FIXED) --------
+    # -------- 2. ROWS SCRAPER (HUMAN-LIKE) --------
     def get_linkedin_from_rows(self, company):
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
+                browser = p.chromium.launch(
+                    headless=True,  # change to False for local debugging
+                    args=["--disable-blink-features=AutomationControlled"]
+                )
 
-                page.goto("https://rows.com/tools/company-enricher")
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                )
 
-                page.fill("input", company)
+                page = context.new_page()
+
+                page.goto("https://rows.com/tools/company-enricher", timeout=60000)
+
+                page.wait_for_selector("input", timeout=10000)
+
+                page.fill("input", "")
+                page.type("input", company, delay=80)
                 page.keyboard.press("Enter")
 
-                # Wait for LinkedIn result properly
-                page.wait_for_selector("a[href*='linkedin.com/company']", timeout=10000)
+                # Wait for content
+                page.wait_for_timeout(6000)
 
                 links = page.locator("a[href*='linkedin.com/company']").all()
 
@@ -62,17 +73,30 @@ class OSINTEngine:
 
         return None
 
-    # -------- 3. BACKUP: FIND LINKEDIN VIA DORK --------
-    def find_company_linkedin_backup(self, exact_name):
-        query = f'site:linkedin.com/company "{exact_name}"'
+    # -------- 3. BACKUP LINKEDIN FINDER --------
+    def find_company_linkedin(self, exact_name, domain=None):
+        queries = [
+            f'site:linkedin.com/company "{exact_name}"',
+            f'site:linkedin.com/company "{domain}"' if domain else ""
+        ]
 
         with DDGS() as ddgs:
-            results = ddgs.text(query, max_results=5)
+            for query in queries:
+                if not query:
+                    continue
 
-            for r in results:
-                url = r.get("href", "")
-                if "linkedin.com/company" in url:
-                    return url
+                try:
+                    results = ddgs.text(query, max_results=5)
+
+                    for r in results:
+                        url = r.get("href", "")
+                        title = r.get("title", "").lower()
+
+                        if "linkedin.com/company" in url:
+                            if exact_name.lower() in title or (domain and domain.split('.')[0] in title):
+                                return url
+                except:
+                    continue
 
         return None
 
@@ -115,7 +139,7 @@ class OSINTEngine:
                             "Name & Title": title.split(" - ")[0],
                             "Role": role,
                             "LinkedIn": href,
-                            "Source": "Strict Mode"
+                            "Source": "Strict"
                         })
 
                 except:
@@ -146,8 +170,9 @@ class OSINTEngine:
                     if exact_name.lower() not in combined:
                         continue
 
-                    if domain and domain.split('.')[0] not in combined:
-                        continue
+                    if domain:
+                        if domain.split('.')[0] not in combined and exact_name.lower() not in combined:
+                            continue
 
                     if "/company/" in href or "/dir/" in href:
                         continue
@@ -155,7 +180,7 @@ class OSINTEngine:
                     people.append({
                         "Name & Title": title.split(" - ")[0],
                         "LinkedIn": href,
-                        "Source": "Fallback Mode"
+                        "Source": "Fallback"
                     })
 
             except:
@@ -167,7 +192,7 @@ class OSINTEngine:
 # ================= UI =================
 st.set_page_config(page_title="OSINT LinkedIn Finder", layout="wide")
 
-st.title("🔍 OSINT LinkedIn Finder (Robust Version)")
+st.title("🔍 OSINT LinkedIn Finder (Final Version)")
 
 company_input = st.text_input("Enter Company Name or URL")
 
@@ -179,20 +204,19 @@ if st.button("Run Scan"):
 
         with st.spinner("Running OSINT Scan..."):
 
-            # Step 1: Enrich
             company = engine.enrich_company(company_input)
             name = company["Name"]
             domain = company["Domain"]
 
-            # Step 2: Try Rows
+            # STEP 1: Try Rows
             linkedin_url = engine.get_linkedin_from_rows(name)
 
-            # Step 3: Backup if Rows fails
+            # STEP 2: Backup if Rows fails
             if not linkedin_url:
-                st.warning("Rows failed → Trying backup LinkedIn search...")
-                linkedin_url = engine.find_company_linkedin_backup(name)
+                st.warning("Rows blocked → Trying backup search...")
+                linkedin_url = engine.find_company_linkedin(name, domain)
 
-            # Step 4: Decide dork strategy
+            # STEP 3: Decision
             if linkedin_url:
                 st.success("LinkedIn company found")
                 slug = engine.extract_slug(linkedin_url)
@@ -201,7 +225,7 @@ if st.button("Run Scan"):
                 st.warning("No LinkedIn found → Using fallback dork")
                 people = engine.dork_fallback(name, domain)
 
-        # ================= RESULTS =================
+        # RESULTS
         st.subheader("Company Info")
 
         col1, col2 = st.columns([1, 4])
