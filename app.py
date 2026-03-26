@@ -2,23 +2,46 @@ import time
 import requests
 import pandas as pd
 import streamlit as st
-from duckduckgo_search import DDGS
 from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+
+
+# ================= HELPER =================
+def clean_domain(url):
+    return url.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+
+
+def google_search(query):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    url = "https://www.google.com/search"
+    params = {"q": query}
+
+    res = requests.get(url, headers=headers, params=params)
+    soup = BeautifulSoup(res.text, "html.parser")
+
+    links = []
+    for a in soup.select("a"):
+        href = a.get("href")
+        if href and "/url?q=" in href:
+            clean = href.split("/url?q=")[1].split("&")[0]
+            links.append(clean)
+
+    return links
 
 
 # ================= ENGINE =================
 class OSINTEngine:
+
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Mozilla/5.0"})
 
     # -------- 1. CLEARBIT --------
     def enrich_company(self, query):
-        clean_query = query.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+        clean_query = clean_domain(query)
 
         try:
             url = f"https://autocomplete.clearbit.com/v1/companies/suggest?query={clean_query}"
-            res = self.session.get(url, timeout=5)
+            res = self.session.get(url)
 
             if res.status_code == 200 and len(res.json()) > 0:
                 data = res.json()[0]
@@ -30,33 +53,37 @@ class OSINTEngine:
         except:
             pass
 
-        return {"Name": query.title(), "Domain": None, "Logo": None}
+        return {"Name": query.title(), "Domain": clean_query, "Logo": None}
 
-    # -------- 2. ROWS SCRAPER (HUMAN-LIKE) --------
-    def get_linkedin_from_rows(self, company):
+    # -------- 2. ROWS SCRAPER (FIXED TEXTAREA) --------
+    def get_linkedin_from_rows(self, domain):
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
-                    headless=True,  # change to False for local debugging
+                    headless=True,
                     args=["--disable-blink-features=AutomationControlled"]
                 )
 
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    user_agent="Mozilla/5.0"
                 )
 
                 page = context.new_page()
 
                 page.goto("https://rows.com/tools/company-enricher", timeout=60000)
 
-                page.wait_for_selector("input", timeout=10000)
+                # ✅ Correct selector (textarea)
+                page.wait_for_selector("textarea[placeholder='Type here...']", timeout=10000)
 
-                page.fill("input", "")
-                page.type("input", company, delay=80)
+                textarea = page.locator("textarea[placeholder='Type here...']")
+
+                textarea.fill("")
+                textarea.type(domain, delay=120)
+
                 page.keyboard.press("Enter")
 
-                # Wait for content
-                page.wait_for_timeout(6000)
+                # Wait for results
+                page.wait_for_timeout(7000)
 
                 links = page.locator("a[href*='linkedin.com/company']").all()
 
@@ -74,29 +101,18 @@ class OSINTEngine:
         return None
 
     # -------- 3. BACKUP LINKEDIN FINDER --------
-    def find_company_linkedin(self, exact_name, domain=None):
+    def find_company_linkedin(self, name, domain):
         queries = [
-            f'site:linkedin.com/company "{exact_name}"',
-            f'site:linkedin.com/company "{domain}"' if domain else ""
+            f'site:linkedin.com/company "{domain}"',
+            f'site:linkedin.com/company "{name}"'
         ]
 
-        with DDGS() as ddgs:
-            for query in queries:
-                if not query:
-                    continue
+        for query in queries:
+            links = google_search(query)
 
-                try:
-                    results = ddgs.text(query, max_results=5)
-
-                    for r in results:
-                        url = r.get("href", "")
-                        title = r.get("title", "").lower()
-
-                        if "linkedin.com/company" in url:
-                            if exact_name.lower() in title or (domain and domain.split('.')[0] in title):
-                                return url
-                except:
-                    continue
+            for link in links:
+                if "linkedin.com/company" in link:
+                    return link
 
         return None
 
@@ -106,152 +122,75 @@ class OSINTEngine:
             return None
         return linkedin_url.split("/company/")[-1].strip("/")
 
-    # -------- 5. STRICT DORK --------
-    def dork_strict(self, exact_name, slug):
-        people = []
-        roles = ["CEO", "Founder", "Owner", "Director", "Partner", "Manager"]
-
-        with DDGS() as ddgs:
-            for role in roles:
-                query = f'site:linkedin.com/in "{exact_name}" "{role}"'
-
-                try:
-                    results = ddgs.text(query, max_results=10)
-
-                    for r in results:
-                        title = r.get("title", "")
-                        href = r.get("href", "")
-                        body = r.get("body", "")
-
-                        combined = (title + body).lower()
-
-                        if exact_name.lower() not in combined:
-                            continue
-
-                        if slug and slug not in href:
-                            if exact_name.lower() not in combined:
-                                continue
-
-                        if "/company/" in href or "/dir/" in href:
-                            continue
-
-                        people.append({
-                            "Name & Title": title.split(" - ")[0],
-                            "Role": role,
-                            "LinkedIn": href,
-                            "Source": "Strict"
-                        })
-
-                except:
-                    continue
-
-                time.sleep(1)
-
-        return list({p["LinkedIn"]: p for p in people}.values())
-
-    # -------- 6. FALLBACK DORK --------
-    def dork_fallback(self, exact_name, domain):
+    # -------- 5. FIND PEOPLE --------
+    def find_people(self, name):
+        roles = ["CEO", "Founder", "Owner", "Director", "Manager"]
         people = []
 
-        roles = '(CEO OR Founder OR Owner OR Director OR Partner OR Manager)'
-        query = f'site:linkedin.com/in "{exact_name}" {roles}'
+        for role in roles:
+            query = f'site:linkedin.com/in "{name}" "{role}"'
+            links = google_search(query)
 
-        with DDGS() as ddgs:
-            try:
-                results = ddgs.text(query, max_results=20)
-
-                for r in results:
-                    title = r.get("title", "")
-                    href = r.get("href", "")
-                    body = r.get("body", "")
-
-                    combined = (title + body).lower()
-
-                    if exact_name.lower() not in combined:
-                        continue
-
-                    if domain:
-                        if domain.split('.')[0] not in combined and exact_name.lower() not in combined:
-                            continue
-
-                    if "/company/" in href or "/dir/" in href:
-                        continue
-
+            for link in links:
+                if "linkedin.com/in" in link:
                     people.append({
-                        "Name & Title": title.split(" - ")[0],
-                        "LinkedIn": href,
-                        "Source": "Fallback"
+                        "LinkedIn": link,
+                        "Role": role
                     })
 
-            except:
-                pass
+            time.sleep(1)
 
         return list({p["LinkedIn"]: p for p in people}.values())
 
 
 # ================= UI =================
-st.set_page_config(page_title="OSINT LinkedIn Finder", layout="wide")
+st.set_page_config(page_title="OSINT Finder", layout="wide")
 
-st.title("🔍 OSINT LinkedIn Finder (Final Version)")
+st.title("🔍 OSINT LinkedIn Finder (Working Version)")
 
 company_input = st.text_input("Enter Company Name or URL")
 
 if st.button("Run Scan"):
     if not company_input:
-        st.error("Enter company first")
+        st.error("Enter input")
     else:
         engine = OSINTEngine()
 
-        with st.spinner("Running OSINT Scan..."):
+        with st.spinner("Running..."):
 
             company = engine.enrich_company(company_input)
             name = company["Name"]
             domain = company["Domain"]
 
-            # STEP 1: Try Rows
-            linkedin_url = engine.get_linkedin_from_rows(name)
+            cleaned_domain = clean_domain(domain)
 
-            # STEP 2: Backup if Rows fails
+            # STEP 1: ROWS
+            linkedin_url = engine.get_linkedin_from_rows(cleaned_domain)
+
+            # STEP 2: BACKUP
             if not linkedin_url:
-                st.warning("Rows blocked → Trying backup search...")
-                linkedin_url = engine.find_company_linkedin(name, domain)
+                st.warning("Rows failed → Trying backup")
+                linkedin_url = engine.find_company_linkedin(name, cleaned_domain)
 
-            # STEP 3: Decision
+            # STEP 3: PEOPLE
             if linkedin_url:
-                st.success("LinkedIn company found")
-                slug = engine.extract_slug(linkedin_url)
-                people = engine.dork_strict(name, slug)
+                st.success("LinkedIn Found")
+                people = engine.find_people(name)
             else:
-                st.warning("No LinkedIn found → Using fallback dork")
-                people = engine.dork_fallback(name, domain)
+                st.warning("No LinkedIn → fallback people search")
+                people = engine.find_people(name)
 
-        # RESULTS
+        # OUTPUT
         st.subheader("Company Info")
-
-        col1, col2 = st.columns([1, 4])
-
-        with col1:
-            if company["Logo"]:
-                st.image(company["Logo"], width=100)
-
-        with col2:
-            st.write(f"**Name:** {name}")
-            st.write(f"**Domain:** {domain}")
-            st.write(f"**LinkedIn:** {linkedin_url}")
-
-        st.divider()
+        st.write(f"**Name:** {name}")
+        st.write(f"**Domain:** {domain}")
+        st.write(f"**LinkedIn:** {linkedin_url}")
 
         st.subheader("Decision Makers")
 
         df = pd.DataFrame(people)
 
         if not df.empty:
-            st.dataframe(df, use_container_width=True)
-
-            st.download_button(
-                "Download CSV",
-                df.to_csv(index=False),
-                file_name="leads.csv"
-            )
+            st.dataframe(df)
         else:
             st.warning("No people found")
