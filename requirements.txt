@@ -3,3 +3,4 @@ pandas
 requests
 duckduckgo-search
 playwright
+beautifulsoup4
