@@ -2,11 +2,17 @@ import time
 import requests
 import pandas as pd
 import streamlit as st
-from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 
+# OPTIONAL: Playwright (may fail in cloud)
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except:
+    PLAYWRIGHT_AVAILABLE = False
 
-# ================= HELPER =================
+
+# ================= HELPERS =================
 def clean_domain(url):
     return url.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
 
@@ -35,7 +41,7 @@ class OSINTEngine:
     def __init__(self):
         self.session = requests.Session()
 
-    # -------- 1. CLEARBIT --------
+    # -------- CLEARBIT --------
     def enrich_company(self, query):
         clean_query = clean_domain(query)
 
@@ -55,33 +61,45 @@ class OSINTEngine:
 
         return {"Name": query.title(), "Domain": clean_query, "Logo": None}
 
-    # -------- 2. ROWS SCRAPER (FIXED TEXTAREA) --------
-    def get_linkedin_from_rows(domain):
+    # -------- ROWS (SAFE VERSION) --------
+    def get_linkedin_from_rows(self, domain):
+        if not PLAYWRIGHT_AVAILABLE:
+            print("Playwright not available")
+            return None
+
         try:
-            print("STEP 1: Starting Playwright")
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
 
-        with sync_playwright() as p:
-            print("STEP 2: Launching browser")
+                page = browser.new_page()
+                page.goto("https://rows.com/tools/company-enricher", timeout=60000)
 
-            browser = p.chromium.launch(headless=True)
+                page.wait_for_selector("textarea[placeholder='Type here...']", timeout=10000)
 
-            print("STEP 3: Browser launched")
+                textarea = page.locator("textarea[placeholder='Type here...']")
+                textarea.fill("")
+                textarea.type(domain, delay=120)
 
-            page = browser.new_page()
+                page.keyboard.press("Enter")
 
-            print("STEP 4: Opening page")
+                page.wait_for_timeout(7000)
 
-            page.goto("https://rows.com/tools/company-enricher")
+                links = page.locator("a[href*='linkedin.com/company']").all()
 
-            print("STEP 5: Page opened")
+                for link in links:
+                    href = link.get_attribute("href")
+                    if href:
+                        browser.close()
+                        return href
 
-            browser.close()
+                browser.close()
 
-    except Exception as e:
-        print("ERROR:", e)
+        except Exception as e:
+            print("ROWS ERROR:", e)
+
         return None
 
-    # -------- 3. BACKUP LINKEDIN FINDER --------
+    # -------- LINKEDIN VIA GOOGLE --------
     def find_company_linkedin(self, name, domain):
         queries = [
             f'site:linkedin.com/company "{domain}"',
@@ -97,13 +115,7 @@ class OSINTEngine:
 
         return None
 
-    # -------- 4. EXTRACT SLUG --------
-    def extract_slug(self, linkedin_url):
-        if not linkedin_url:
-            return None
-        return linkedin_url.split("/company/")[-1].strip("/")
-
-    # -------- 5. FIND PEOPLE --------
+    # -------- PEOPLE SEARCH --------
     def find_people(self, name):
         roles = ["CEO", "Founder", "Owner", "Director", "Manager"]
         people = []
@@ -127,7 +139,7 @@ class OSINTEngine:
 # ================= UI =================
 st.set_page_config(page_title="OSINT Finder", layout="wide")
 
-st.title("🔍 OSINT LinkedIn Finder (Working Version)")
+st.title("🔍 OSINT LinkedIn Finder (Stable Version)")
 
 company_input = st.text_input("Enter Company Name or URL")
 
@@ -137,7 +149,7 @@ if st.button("Run Scan"):
     else:
         engine = OSINTEngine()
 
-        with st.spinner("Running..."):
+        with st.spinner("Running scan..."):
 
             company = engine.enrich_company(company_input)
             name = company["Name"]
@@ -145,20 +157,20 @@ if st.button("Run Scan"):
 
             cleaned_domain = clean_domain(domain)
 
-            # STEP 1: ROWS
+            # STEP 1: Try Rows
             linkedin_url = engine.get_linkedin_from_rows(cleaned_domain)
 
-            # STEP 2: BACKUP
-            if not linkedin_url:
-                st.warning("Rows failed → Trying backup")
+            if linkedin_url:
+                st.success("LinkedIn found via Rows")
+            else:
+                st.warning("Rows unavailable → using Google fallback")
                 linkedin_url = engine.find_company_linkedin(name, cleaned_domain)
 
-            # STEP 3: PEOPLE
+            # STEP 2: Find People
             if linkedin_url:
-                st.success("LinkedIn Found")
                 people = engine.find_people(name)
             else:
-                st.warning("No LinkedIn → fallback people search")
+                st.warning("No LinkedIn found → searching people anyway")
                 people = engine.find_people(name)
 
         # OUTPUT
