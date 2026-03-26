@@ -57,7 +57,7 @@ class OSINTEngine:
 
     # -------- 2. ROWS SCRAPER (FIXED TEXTAREA) --------
     def get_linkedin_from_rows(domain):
-    try:
+        try:
         print("STEP 1: Starting Playwright")
 
         with sync_playwright() as p:
