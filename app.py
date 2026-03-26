@@ -56,48 +56,29 @@ class OSINTEngine:
         return {"Name": query.title(), "Domain": clean_query, "Logo": None}
 
     # -------- 2. ROWS SCRAPER (FIXED TEXTAREA) --------
-    def get_linkedin_from_rows(self, domain):
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled"]
-                )
+    def get_linkedin_from_rows(domain):
+    try:
+        print("STEP 1: Starting Playwright")
 
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0"
-                )
+        with sync_playwright() as p:
+            print("STEP 2: Launching browser")
 
-                page = context.new_page()
+            browser = p.chromium.launch(headless=True)
 
-                page.goto("https://rows.com/tools/company-enricher", timeout=60000)
+            print("STEP 3: Browser launched")
 
-                # ✅ Correct selector (textarea)
-                page.wait_for_selector("textarea[placeholder='Type here...']", timeout=10000)
+            page = browser.new_page()
 
-                textarea = page.locator("textarea[placeholder='Type here...']")
+            print("STEP 4: Opening page")
 
-                textarea.fill("")
-                textarea.type(domain, delay=120)
+            page.goto("https://rows.com/tools/company-enricher")
 
-                page.keyboard.press("Enter")
+            print("STEP 5: Page opened")
 
-                # Wait for results
-                page.wait_for_timeout(7000)
+            browser.close()
 
-                links = page.locator("a[href*='linkedin.com/company']").all()
-
-                for link in links:
-                    href = link.get_attribute("href")
-                    if href:
-                        browser.close()
-                        return href
-
-                browser.close()
-
-        except Exception as e:
-            print("Rows failed:", e)
-
+    except Exception as e:
+        print("ERROR:", e)
         return None
 
     # -------- 3. BACKUP LINKEDIN FINDER --------
