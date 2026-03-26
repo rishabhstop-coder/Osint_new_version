@@ -10,9 +10,7 @@ from playwright.sync_api import sync_playwright
 class OSINTEngine:
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0"
-        })
+        self.session.headers.update({"User-Agent": "Mozilla/5.0"})
 
     # -------- 1. CLEARBIT --------
     def enrich_company(self, query):
@@ -34,7 +32,7 @@ class OSINTEngine:
 
         return {"Name": query.title(), "Domain": None, "Logo": None}
 
-    # -------- 2. ROWS SCRAPER --------
+    # -------- 2. ROWS SCRAPER (FIXED) --------
     def get_linkedin_from_rows(self, company):
         try:
             with sync_playwright() as p:
@@ -43,35 +41,50 @@ class OSINTEngine:
 
                 page.goto("https://rows.com/tools/company-enricher")
 
-                page.fill('input', company)
+                page.fill("input", company)
                 page.keyboard.press("Enter")
 
-                page.wait_for_timeout(4000)
+                # Wait for LinkedIn result properly
+                page.wait_for_selector("a[href*='linkedin.com/company']", timeout=10000)
 
-                links = page.locator("a").all()
+                links = page.locator("a[href*='linkedin.com/company']").all()
 
                 for link in links:
                     href = link.get_attribute("href")
-                    if href and "linkedin.com/company" in href:
+                    if href:
                         browser.close()
                         return href
 
                 browser.close()
+
         except Exception as e:
             print("Rows failed:", e)
 
         return None
 
-    # -------- 3. EXTRACT SLUG --------
+    # -------- 3. BACKUP: FIND LINKEDIN VIA DORK --------
+    def find_company_linkedin_backup(self, exact_name):
+        query = f'site:linkedin.com/company "{exact_name}"'
+
+        with DDGS() as ddgs:
+            results = ddgs.text(query, max_results=5)
+
+            for r in results:
+                url = r.get("href", "")
+                if "linkedin.com/company" in url:
+                    return url
+
+        return None
+
+    # -------- 4. EXTRACT SLUG --------
     def extract_slug(self, linkedin_url):
         if not linkedin_url:
             return None
         return linkedin_url.split("/company/")[-1].strip("/")
 
-    # -------- 4. STRICT DORK --------
+    # -------- 5. STRICT DORK --------
     def dork_strict(self, exact_name, slug):
         people = []
-
         roles = ["CEO", "Founder", "Owner", "Director", "Partner", "Manager"]
 
         with DDGS() as ddgs:
@@ -102,7 +115,7 @@ class OSINTEngine:
                             "Name & Title": title.split(" - ")[0],
                             "Role": role,
                             "LinkedIn": href,
-                            "Source": "Rows + Strict"
+                            "Source": "Strict Mode"
                         })
 
                 except:
@@ -112,7 +125,7 @@ class OSINTEngine:
 
         return list({p["LinkedIn"]: p for p in people}.values())
 
-    # -------- 5. FALLBACK DORK --------
+    # -------- 6. FALLBACK DORK --------
     def dork_fallback(self, exact_name, domain):
         people = []
 
@@ -142,7 +155,7 @@ class OSINTEngine:
                     people.append({
                         "Name & Title": title.split(" - ")[0],
                         "LinkedIn": href,
-                        "Source": "Fallback"
+                        "Source": "Fallback Mode"
                     })
 
             except:
@@ -152,9 +165,9 @@ class OSINTEngine:
 
 
 # ================= UI =================
-st.set_page_config(page_title="OSINT Lead Finder", layout="wide")
+st.set_page_config(page_title="OSINT LinkedIn Finder", layout="wide")
 
-st.title("🔍 OSINT LinkedIn Finder (Rows + Fallback)")
+st.title("🔍 OSINT LinkedIn Finder (Robust Version)")
 
 company_input = st.text_input("Enter Company Name or URL")
 
@@ -174,14 +187,18 @@ if st.button("Run Scan"):
             # Step 2: Try Rows
             linkedin_url = engine.get_linkedin_from_rows(name)
 
+            # Step 3: Backup if Rows fails
+            if not linkedin_url:
+                st.warning("Rows failed → Trying backup LinkedIn search...")
+                linkedin_url = engine.find_company_linkedin_backup(name)
+
+            # Step 4: Decide dork strategy
             if linkedin_url:
-                st.success("LinkedIn Company Found (Rows)")
+                st.success("LinkedIn company found")
                 slug = engine.extract_slug(linkedin_url)
-
                 people = engine.dork_strict(name, slug)
-
             else:
-                st.warning("Rows failed → Using fallback dork")
+                st.warning("No LinkedIn found → Using fallback dork")
                 people = engine.dork_fallback(name, domain)
 
         # ================= RESULTS =================
