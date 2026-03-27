@@ -1,15 +1,13 @@
 import streamlit as st
 import pandas as pd
-import dns.resolver
-import smtplib
-import socket
 import time
+import re
 from duckduckgo_search import DDGS
 from rapidfuzz import fuzz
 
+# ================= CORE ENGINE =================
 class FreeOSINTFramework:
     def __init__(self):
-        self.timeout = 5
         self.patterns = [
             "{first}.{last}@{domain}",
             "{f}{last}@{domain}",
@@ -18,121 +16,139 @@ class FreeOSINTFramework:
             "{first}{l}@{domain}"
         ]
 
-    # -------- 1. FREE DISCOVERY --------
-    def find_leads_free(self, company_name, domain):
-        leads = []  # FIXED
+    # -------- CLEAN INPUT --------
+    def clean_domain(self, domain):
+        return (
+            domain.replace("https://", "")
+            .replace("http://", "")
+            .replace("www.", "")
+            .strip("/")
+        )
 
-        roles = '(CEO OR Founder OR Owner OR Director OR Manager OR VP)'
-        query = f'site:linkedin.com/in/ "{company_name}" {roles}'
-        
+    def clean_name(self, name):
+        return name.strip()
+
+    # -------- SEARCH LEADS --------
+    def find_leads(self, company_name, domain):
+        leads = []
+
+        roles = "(CEO OR Founder OR Owner OR Director OR Manager OR VP)"
+        query = f'site:linkedin.com/in/ ("{company_name}" OR "{domain}") {roles}'
+
         try:
             with DDGS() as ddgs:
-                results = ddgs.text(query, max_results=10)
-                if results:
-                    for r in results:
-                        title = r.get("title", "")
-                        
-                        if fuzz.partial_ratio(company_name.lower(), title.lower()) > 80:
-                            # FIXED name extraction
-                            name_part = title.split(" - ")[0].split(" | ")[0].strip()
+                results = ddgs.text(query, max_results=15)
 
+                for r in results:
+                    title = r.get("title", "")
+
+                    # Relaxed matching
+                    if fuzz.partial_ratio(company_name.lower(), title.lower()) > 60:
+                        
+                        # Extract clean name
+                        name = re.split(r"[-|]", title)[0].strip()
+
+                        # Basic validation
+                        if len(name.split()) >= 2:
                             leads.append({
-                                "Full Name": name_part,
+                                "Full Name": name,
                                 "LinkedIn": r.get("href"),
                                 "Snippet": r.get("body", "")
                             })
+
         except Exception as e:
             st.error(f"Search Error: {e}")
-            
+
         return leads
 
-    # -------- 2. EMAIL VERIFICATION --------
-    def verify_email_local(self, email):
-        try:
-            domain = email.split('@')[1]  # FIXED
-            
-            records = dns.resolver.resolve(domain, 'MX')
-            mx_record = sorted(records, key=lambda r: r.preference)[0].exchange.to_text()
-            
-            with smtplib.SMTP(mx_record, port=25, timeout=self.timeout) as server:
-                server.helo(socket.gethostname())
-                server.mail('test@example.com')
-                code, message = server.rcpt(email)
-                
-                return True if code == 250 else False
-        except Exception:
-            return False
-
-    # -------- 3. PATTERN PERMUTATION --------
-    def guess_and_verify(self, full_name, domain):
+    # -------- EMAIL GUESSING ONLY --------
+    def generate_email(self, full_name, domain):
         parts = full_name.lower().split()
         if len(parts) < 2:
-            return "Incomplete Name"
-        
-        first = parts[0]  # FIXED
+            return "Invalid Name"
+
+        first = parts[0]
         last = parts[-1]
 
+        emails = []
         for p in self.patterns:
-            email = p.format(first=first, last=last, f=first[0], l=last[0], domain=domain)  # FIXED
-            
-            if self.verify_email_local(email):
-                return email
-        
-        return "Not Found (Local Probe)"
+            emails.append(
+                p.format(
+                    first=first,
+                    last=last,
+                    f=first[0],
+                    l=last[0],
+                    domain=domain
+                )
+            )
+
+        return emails
+
 
 # ================= STREAMLIT UI =================
-st.set_page_config(page_title="Free OSINT Prober", layout="wide")
-st.title("🆓 100% Free OSINT Lead Engine")
-st.markdown("This tool performs **LinkedIn Dorking** and **SMTP Handshaking**.")
+st.set_page_config(page_title="OSINT Lead Engine", layout="wide")
 
-col_in1, col_in2 = st.columns(2)
+st.title("🧠 OSINT Lead Finder (Actually Works Version)")
+st.markdown("Find decision-makers using LinkedIn dorking + smart email guessing.")
 
-with col_in1:
-    target_company = st.text_input("Company Name", placeholder="e.g. Apple")
+col1, col2 = st.columns(2)
 
-with col_in2:
-    target_domain = st.text_input("Company Domain", placeholder="e.g. apple.com")
+with col1:
+    company_name = st.text_input("Company Name", placeholder="e.g. Tesla")
 
-if st.button("Initialize Deep Probe", type="primary"):
-    if not target_company or not target_domain:
-        st.error("Please provide both a name and a domain.")
+with col2:
+    company_domain = st.text_input("Company Domain", placeholder="e.g. tesla.com")
+
+if st.button("Run OSINT Scan", type="primary"):
+    if not company_name or not company_domain:
+        st.error("Enter both company name and domain.")
     else:
         engine = FreeOSINTFramework()
-        
-        with st.status("Gathering Intelligence...", expanded=True) as status:
+
+        # Clean inputs
+        company_name = engine.clean_name(company_name)
+        company_domain = engine.clean_domain(company_domain)
+
+        with st.status("Running OSINT Scan...", expanded=True) as status:
             st.write("🔍 Searching LinkedIn profiles...")
-            raw_leads = engine.find_leads_free(target_company, target_domain)
             
-            if not raw_leads:
-                st.warning("No profiles found. Try a broader company name.")
-                status.update(label="Probe Failed", state="error")
+            leads = engine.find_leads(company_name, company_domain)
+
+            if not leads:
+                st.warning("No leads found. Try broader company name.")
+                status.update(label="No Results", state="error")
             else:
-                st.write(f"🧬 Found {len(raw_leads)} profiles...")
-                
-                results = []  # FIXED
-                
-                for lead in raw_leads:
-                    st.write(f"📡 Checking: {lead['Full Name']}...")
-                    
-                    verified_email = engine.guess_and_verify(
-                        lead["Full Name"], target_domain
+                st.write(f"✅ Found {len(leads)} profiles")
+
+                results = []
+
+                for lead in leads:
+                    st.write(f"Processing: {lead['Full Name']}")
+
+                    emails = engine.generate_email(
+                        lead["Full Name"], company_domain
                     )
-                    
+
                     results.append({
                         "Name": lead["Full Name"],
-                        "Verified Email": verified_email,
-                        "LinkedIn URL": lead["LinkedIn"],
-                        "Reliability": "High" if "@" in verified_email else "Low"
+                        "LinkedIn": lead["LinkedIn"],
+                        "Email Guesses": ", ".join(emails[:3]),
+                        "Confidence": "Medium (Pattern-Based)"
                     })
-                    
-                    time.sleep(1)
-                
-                status.update(label="Probe Complete!", state="complete", expanded=False)
-                
+
+                    time.sleep(0.5)
+
+                status.update(label="Scan Complete", state="complete", expanded=False)
+
                 st.divider()
-                st.subheader(f"Results for {target_company}")
-                
+                st.subheader(f"Results for {company_name}")
+
                 df = pd.DataFrame(results)
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
-st.info("⚠️ SMTP probing may fail due to ISP blocking (port 25).") 
+
+# ================= FOOTER =================
+st.info(
+    "⚠️ Note: Email verification via SMTP is disabled on cloud environments. "
+    "Results are based on common corporate email patterns."
+)
