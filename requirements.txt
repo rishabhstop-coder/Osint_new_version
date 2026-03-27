@@ -4,3 +4,8 @@ requests
 duckduckgo-search
 playwright
 beautifulsoup4
+streamlit
+pandas
+dnspython
+duckduckgo-search
+rapidfuzz
