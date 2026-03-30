@@ -9,7 +9,6 @@ from rapidfuzz import fuzz
 class OSINTLeadEngine:
     def __init__(self):
 
-        # Expanded decision-maker roles
         self.roles = [
             "CEO", "Chief Executive Officer",
             "Founder", "Co-Founder", "Owner",
@@ -21,7 +20,6 @@ class OSINTLeadEngine:
             "Product Manager", "Business Development"
         ]
 
-        # Expanded email patterns
         self.patterns = [
             "{first}.{last}@{domain}",
             "{first}{last}@{domain}",
@@ -33,7 +31,28 @@ class OSINTLeadEngine:
             "{f}.{last}@{domain}"
         ]
 
-    # -------- CLEAN INPUT --------
+    # -------- INPUT PARSER --------
+    def parse_input(self, user_input):
+        user_input = user_input.strip().lower()
+
+        if "." in user_input and " " not in user_input:
+            domain = self.clean_domain(user_input)
+            company = domain.split(".")[0]
+        else:
+            company = user_input
+            domain = ""
+
+        variations = list(set([
+            company,
+            company.replace(" technologies", ""),
+            company.replace(" tech", ""),
+            company.replace(" solutions", ""),
+            company.replace(" pvt ltd", ""),
+            company.replace(" private limited", "")
+        ]))
+
+        return company, domain, variations
+
     def clean_domain(self, domain):
         return (
             domain.replace("https://", "")
@@ -42,42 +61,31 @@ class OSINTLeadEngine:
             .strip("/")
         )
 
-    def clean_name(self, name):
-        return name.strip()
-
-    # -------- BUILD SEARCH QUERIES --------
-    def build_queries(self, company_name, domain):
+    # -------- QUERY BUILDER --------
+    def build_queries(self, company, domain, variations):
         role_query = " OR ".join([f'"{r}"' for r in self.roles])
+        queries = []
 
-        return [
-            # LinkedIn (primary)
-            f'site:linkedin.com/in ("{company_name}" OR "{domain}") ({role_query})',
-            f'site:linkedin.com/in "{company_name}" ("CEO" OR "Founder" OR "Director")',
-            f'site:linkedin.com/in "{company_name}" ("marketing" OR "growth" OR "head")',
+        for name in variations:
+            queries.extend([
+                f'site:linkedin.com/in "{name}" ({role_query})',
+                f'site:linkedin.com/in "{name}"',
+                f'"{name}" ("CEO" OR "Founder" OR "Director")',
+                f'"{name}" "our team"',
+                f'"{name}" "leadership"',
+                f'"{name}" "CEO said"',
+            ])
 
-            # General Google
-            f'"{company_name}" ("CEO" OR "Founder" OR "Managing Director")',
+        if domain:
+            queries.extend([
+                f'site:{domain} ("team" OR "about")',
+                f'"@{domain}" ("CEO" OR "Founder")',
+                f'site:{domain} filetype:pdf ("CEO" OR "Director")'
+            ])
 
-            # Website pages
-            f'site:{domain} ("team" OR "about" OR "leadership")',
+        return queries
 
-            # Emails exposed
-            f'"@{domain}" ("CEO" OR "Founder" OR "Director")',
-
-            # PDFs (hidden goldmine)
-            f'site:{domain} filetype:pdf ("CEO" OR "Director")',
-
-            # News mentions
-            f'"{company_name}" "CEO said"',
-
-            # Crunchbase / profiles
-            f'site:crunchbase.com "{company_name}"',
-
-            # Social bios
-            f'site:twitter.com "{company_name}" ("founder" OR "ceo")'
-        ]
-
-    # -------- EXTRACT ROLE --------
+    # -------- ROLE EXTRACTION --------
     def extract_role(self, text):
         match = re.findall(
             r"(CEO|Founder|Director|Head|Manager|VP|Chief|Owner)",
@@ -86,10 +94,10 @@ class OSINTLeadEngine:
         )
         return match[0] if match else "N/A"
 
-    # -------- FIND LEADS --------
-    def find_leads(self, company_name, domain):
+    # -------- LEAD FINDER --------
+    def find_leads(self, company, domain, variations):
         leads = []
-        queries = self.build_queries(company_name, domain)
+        queries = self.build_queries(company, domain, variations)
 
         try:
             with DDGS() as ddgs:
@@ -101,10 +109,12 @@ class OSINTLeadEngine:
                         snippet = r.get("body", "")
                         link = r.get("href")
 
+                        if not link or "linkedin.com/in" not in link:
+                            continue
+
                         combined = f"{title} {snippet}".lower()
 
-                        # Fuzzy match company relevance
-                        if fuzz.partial_ratio(company_name.lower(), combined) > 55:
+                        if fuzz.partial_ratio(company, combined) > 50:
 
                             name = re.split(r"[-|,]", title)[0].strip()
 
@@ -118,15 +128,18 @@ class OSINTLeadEngine:
                                     "Snippet": snippet
                                 })
 
+                    time.sleep(0.5)
+
         except Exception as e:
             st.error(f"Search Error: {e}")
 
-        # Remove duplicates
+        # Deduplicate
         unique = {l["Full Name"]: l for l in leads}
 
-        # Prioritize decision-makers
-        priority = {"CEO": 1, "Founder": 1, "Owner": 1, "Chief": 1,
-                    "Director": 2, "VP": 3, "Head": 3, "Manager": 4}
+        priority = {
+            "CEO": 1, "Founder": 1, "Owner": 1, "Chief": 1,
+            "Director": 2, "VP": 3, "Head": 3, "Manager": 4
+        }
 
         sorted_leads = sorted(
             unique.values(),
@@ -135,17 +148,17 @@ class OSINTLeadEngine:
 
         return sorted_leads
 
-    # -------- EMAIL GUESSING --------
+    # -------- EMAIL GENERATOR --------
     def generate_email(self, full_name, domain):
         parts = full_name.lower().split()
 
-        if len(parts) < 2:
-            return ["Invalid Name"]
+        if len(parts) < 2 or not domain:
+            return ["Not enough data"]
 
         first = parts[0]
         last = parts[-1]
 
-        emails = [
+        return [
             p.format(
                 first=first,
                 last=last,
@@ -156,8 +169,6 @@ class OSINTLeadEngine:
             for p in self.patterns
         ]
 
-        return emails
-
 
 # ================= STREAMLIT UI =================
 st.set_page_config(page_title="OSINT Lead Engine PRO", layout="wide")
@@ -165,27 +176,23 @@ st.set_page_config(page_title="OSINT Lead Engine PRO", layout="wide")
 st.title("🚀 OSINT Decision-Maker Finder")
 st.markdown("Find CEOs, founders, and key decision-makers using advanced dorking.")
 
-col1, col2 = st.columns(2)
-
-with col1:
-    company_name = st.text_input("Company Name", placeholder="e.g. Tesla")
-
-with col2:
-    company_domain = st.text_input("Company Domain", placeholder="e.g. tesla.com")
+query_input = st.text_input(
+    "Company Name or Domain",
+    placeholder="e.g. tesla OR tesla.com"
+)
 
 if st.button("Run Scan", type="primary"):
 
-    if not company_name or not company_domain:
-        st.error("Enter both fields.")
+    if not query_input:
+        st.error("Enter a company or domain.")
     else:
         engine = OSINTLeadEngine()
 
-        company_name = engine.clean_name(company_name)
-        company_domain = engine.clean_domain(company_domain)
+        company, domain, variations = engine.parse_input(query_input)
 
         with st.status("Running OSINT Scan...", expanded=True):
 
-            leads = engine.find_leads(company_name, company_domain)
+            leads = engine.find_leads(company, domain, variations)
 
             if not leads:
                 st.warning("No leads found. Try broader keywords.")
@@ -195,7 +202,7 @@ if st.button("Run Scan", type="primary"):
                 for lead in leads:
                     emails = engine.generate_email(
                         lead["Full Name"],
-                        company_domain
+                        domain
                     )
 
                     results.append({
@@ -205,15 +212,10 @@ if st.button("Run Scan", type="primary"):
                         "Top Email Guesses": ", ".join(emails[:3])
                     })
 
-                    time.sleep(0.3)
-
                 df = pd.DataFrame(results)
 
                 st.success(f"Found {len(df)} decision-makers")
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
-
 # ================= FOOTER =================
-st.info(
-    "⚠️ Emails are pattern-based guesses. Use verification tools for accuracy."
-)
+st.info("⚠️ Emails are pattern-based guesses. Verify before use.")
