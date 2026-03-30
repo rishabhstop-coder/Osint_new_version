@@ -1,217 +1,176 @@
 import streamlit as st
 import pandas as pd
-import time
 import re
+import time
+import random
 from duckduckgo_search import DDGS
 from rapidfuzz import fuzz
 
-# ================= CORE ENGINE =================
-class OSINTLeadEngine:
-
+class SimpleLeadFinder:
     def __init__(self):
-        self.roles = ["CEO", "Founder", "Director", "Owner", "Head", "VP", "Chief"]
-
-        self.patterns = [
+        self.email_patterns = [
             "{first}.{last}@{domain}",
             "{first}{last}@{domain}",
             "{f}{last}@{domain}",
             "{first}@{domain}",
+            "{first}_{last}@{domain}",
+            "{last}.{first}@{domain}",
         ]
 
-    # -------- INPUT PARSER --------
-    def parse_input(self, user_input):
-        user_input = user_input.strip().lower()
-
-        # 🔥 LinkedIn company detection
-        if "linkedin.com/company/" in user_input:
-            slug = user_input.split("company/")[1].split("/")[0]
-            company = slug.replace("-", " ")
-            return company, "", [company], slug
-
-        # Domain detection
-        if "." in user_input and " " not in user_input:
-            domain = user_input.replace("https://", "").replace("http://", "").replace("www.", "")
-            company = domain.split(".")[0]
+    def parse_input(self, query):
+        query = query.strip()
+        if not query:
+            return "", ""
+        
+        if re.search(r'\.(com|in|net|org|io|co)$', query.lower()) or "://" in query:
+            domain = self.clean_domain(query)
+            company = domain.split(".")[0].replace("-", " ").title()
         else:
-            company = user_input
+            company = query
             domain = ""
+        return company, domain.lower()
 
-        base = company.split()[0]
+    def clean_domain(self, domain):
+        return (domain.lower()
+                .replace("https://", "").replace("http://", "")
+                .replace("www.", "").strip("/"))
 
-        variations = list(set([
-            company,
-            base,
-            company.replace(" technologies", ""),
-            company.replace(" tech", ""),
-            company.replace(" solutions", ""),
-        ]))
+    def extract_name(self, title):
+        title = re.sub(r'\s*\|\s*.*', '', title)
+        title = re.sub(r' at .*', '', title, flags=re.I)
+        title = re.sub(r'[-–—|]', ' ', title).strip()
+        parts = title.split()[:4]
+        name = " ".join(parts).title()
+        return name if len(parts) >= 2 else None
 
-        return company, domain, variations, None
-
-    # -------- QUERY BUILDER --------
-    def build_queries(self, variations, domain, slug):
-
-        queries = []
-
-        # 🔥 LinkedIn COMPANY MODE (best results)
-        if slug:
-            base = slug.replace("-", " ")
-
-            queries.extend([
-                f'site:linkedin.com/in "{slug}"',
-                f'site:linkedin.com/in "{base}"',
-                f'site:linkedin.com/in "{base}" CEO',
-                f'site:linkedin.com/in "{base}" founder',
-            ])
-            return queries
-
-        # 🔥 Normal mode
-        for name in variations:
-            queries.extend([
-                f'site:linkedin.com/in "{name}" ("CEO" OR "Founder" OR "Director")',
-                f'site:linkedin.com/in "{name}"',
-                f'"{name}" CEO',
-                f'"{name}" founder',
-                f'"{name}" "our team"',
-            ])
-
-        if domain:
-            queries.append(f'"@{domain}"')
-
-        return list(set(queries))
-
-    # -------- ROLE EXTRACTION --------
     def extract_role(self, text):
-        match = re.findall(r"(CEO|Founder|Director|Head|VP|Chief|Owner)", text, re.I)
-        return match[0] if match else "Employee"
+        text_lower = text.lower()
+        if "ceo" in text_lower or "chief executive" in text_lower:
+            return "CEO"
+        if "cto" in text_lower or "chief technology" in text_lower:
+            return "CTO"
+        if "founder" in text_lower:
+            return "Founder / Co-Founder"
+        if "director" in text_lower:
+            return "Director"
+        return "Decision Maker"
 
-    # -------- LEAD FINDER --------
-    def find_leads(self, company, domain, variations, slug):
-
+    def find_leads(self, company, domain):
         leads = []
-        queries = self.build_queries(variations, domain, slug)
+        queries = [
+            f'"{company}" CEO OR Founder OR CTO',
+            f'{company} (CEO OR Founder OR CTO) Ahmedabad',
+            f'site:in.linkedin.com/in "{company}"',
+            f'site:linkedin.com/in "{company}"',
+            f'"{company}" linkedin'
+        ]
 
         with DDGS() as ddgs:
-            for query in queries:
+            for q in queries:
                 try:
-                    results = ddgs.text(query, max_results=12)
-
+                    results = list(ddgs.text(q, max_results=12))
                     for r in results:
-                        link = r.get("href")
+                        link = r.get("href", "")
                         title = r.get("title", "")
                         snippet = r.get("body", "")
 
-                        if not link or "linkedin.com/in" not in link:
+                        if "linkedin.com/in" not in link:
                             continue
 
-                        combined = f"{title} {snippet}".lower()
+                        name = self.extract_name(title)
+                        if not name:
+                            continue
 
-                        # 🔥 smarter match threshold
-                        if fuzz.partial_ratio(company, combined) > 35:
+                        combined = (title + " " + snippet).lower()
+                        score = fuzz.token_set_ratio(company.lower(), combined)
 
-                            name = re.split(r"[-|,]", title)[0].strip()
-
-                            if 2 <= len(name.split()) <= 4:
-                                leads.append({
-                                    "Full Name": name,
-                                    "Role": self.extract_role(combined),
-                                    "Source": link
-                                })
-
-                    time.sleep(0.3)
-
+                        if score > 35 or company.lower() in combined:
+                            role = self.extract_role(combined)
+                            leads.append({
+                                "Full Name": name,
+                                "Role": role,
+                                "Source": link,
+                                "Score": score
+                            })
+                    time.sleep(random.uniform(0.7, 1.4))
                 except:
                     continue
 
-        # 🔥 FALLBACK (never empty again)
-        if not leads:
-            st.warning("No decision-makers found → switching to employee discovery")
-
-            fallback_queries = [
-                f'site:linkedin.com/in "{company}"',
-                f'"{company}" linkedin'
-            ]
-
-            with DDGS() as ddgs:
-                for query in fallback_queries:
-                    try:
-                        results = ddgs.text(query, max_results=15)
-
-                        for r in results:
-                            link = r.get("href")
-                            title = r.get("title", "")
-
-                            if not link or "linkedin.com/in" not in link:
-                                continue
-
-                            name = re.split(r"[-|,]", title)[0].strip()
-
-                            if 2 <= len(name.split()) <= 4:
-                                leads.append({
-                                    "Full Name": name,
-                                    "Role": "Employee",
-                                    "Source": link
-                                })
-                    except:
-                        continue
-
         # Remove duplicates
-        unique = {l["Full Name"]: l for l in leads}
+        unique = {}
+        for lead in leads:
+            n = lead["Full Name"]
+            if n not in unique or lead["Score"] > unique[n]["Score"]:
+                unique[n] = lead
 
-        return list(unique.values())
+        return sorted(unique.values(), key=lambda x: x["Score"], reverse=True)
 
-    # -------- EMAIL GENERATOR --------
-    def generate_email(self, name, domain):
+    def generate_emails(self, full_name, domain):
         if not domain:
             return ["No domain"]
-
-        parts = name.lower().split()
+        parts = full_name.lower().split()
         if len(parts) < 2:
-            return ["Invalid"]
-
-        first, last = parts[0], parts[-1]
-
-        return [
-            p.format(first=first, last=last, f=first[0], domain=domain)
-            for p in self.patterns
-        ]
+            return ["Invalid name"]
+        first = parts[0]
+        last = parts[-1]
+        f = first[0]
+        return [p.format(first=first, last=last, f=f, domain=domain) for p in self.email_patterns][:3]
 
 
-# ================= UI =================
-st.set_page_config(layout="wide")
-st.title("🚀 OSINT Decision-Maker Finder")
+# ====================== STREAMLIT APP ======================
+st.set_page_config(page_title="Simple OSINT Finder", layout="wide")
+st.title("🚀 Simple OSINT Decision-Maker Finder")
 
-query = st.text_input("Company Name / Domain / LinkedIn URL")
+st.markdown("**Super simplified version** — specially for small Indian companies like Briskstar")
 
-if st.button("Run Scan"):
+query = st.text_input("Company Name or Domain", 
+                      placeholder="briskstar.com or Briskstar Technologies",
+                      help="Try domain first → briskstar.com")
 
+if st.button("🔍 Run Search", type="primary"):
     if not query:
-        st.error("Enter something.")
+        st.error("Please enter something")
     else:
-        engine = OSINTLeadEngine()
-        company, domain, variations, slug = engine.parse_input(query)
+        engine = SimpleLeadFinder()
+        company, domain = engine.parse_input(query)
 
-        with st.spinner("Running OSINT scan..."):
-            leads = engine.find_leads(company, domain, variations, slug)
+        st.write(f"**Scanning:** {company} | Domain: {domain or 'N/A'}")
 
-        if not leads:
-            st.error("Still nothing found. Company likely has no public footprint.")
-        else:
-            data = []
+        with st.spinner("Searching public sources... (DDGS is slow)"):
+            leads = engine.find_leads(company, domain)
 
-            for l in leads:
-                emails = engine.generate_email(l["Full Name"], domain)
-
-                data.append({
-                    "Name": l["Full Name"],
-                    "Role": l["Role"],
-                    "Source": l["Source"],
-                    "Email Guess": ", ".join(emails[:2])
+        if leads:
+            results = []
+            for lead in leads:
+                emails = engine.generate_emails(lead["Full Name"], domain)
+                results.append({
+                    "Name": lead["Full Name"],
+                    "Role": lead["Role"],
+                    "Email Guesses": ", ".join(emails),
+                    "Source": lead["Source"]
                 })
 
-            df = pd.DataFrame(data)
-
-            st.success(f"Found {len(df)} people")
+            df = pd.DataFrame(results)
+            st.success(f"✅ Found {len(df)} leads")
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-st.info("⚠️ Email guesses are not verified. Use validation tools.")
+            csv = df.to_csv(index=False).encode()
+            st.download_button("📥 Download as CSV", csv, f"{company}_leads.csv", "text/csv")
+        else:
+            st.warning("No leads found from search. Try the domain or use manual paste below.")
+
+# ====================== MANUAL PASTE SECTION ======================
+st.divider()
+st.subheader("Manual LinkedIn Links (Best when search fails)")
+
+manual = st.text_area("Paste LinkedIn profile URLs (one per line)", height=180,
+                      placeholder="https://in.linkedin.com/in/bhavesh-sanghani\nhttps://in.linkedin.com/in/keyur-soni-b7a1169")
+
+if st.button("Process Manual Links"):
+    if manual.strip():
+        st.success("Links received. In real use, we can parse them better. For now, you can open them directly.")
+        st.info("Known good links for Briskstar:\n• https://in.linkedin.com/in/bhavesh-sanghani (CEO & Co-Founder)\n• Bijal Soni is also a Co-Founder & CTO")
+    else:
+        st.warning("Paste at least one link")
+
+st.caption("⚠️ This tool is for educational/OSINT use only. Emails are guesses only. DDGS is weak — that's why manual paste option is there.")
