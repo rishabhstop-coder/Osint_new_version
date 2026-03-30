@@ -9,3 +9,8 @@ pandas
 dnspython
 duckduckgo-search
 rapidfuzz
+streamlit
+pandas
+google-search-results
+rapidfuzz
+duckduckgo_search
