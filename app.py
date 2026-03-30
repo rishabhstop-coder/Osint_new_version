@@ -2,26 +2,22 @@ import streamlit as st
 import pandas as pd
 import re
 import time
-import random
-from duckduckgo_search import DDGS
+from serpapi import GoogleSearch
 from rapidfuzz import fuzz
 
-# ====================== ENGINE ======================
-class LeadFinder:
-    def __init__(self):
-        self.email_patterns = [
-            "{first}.{last}@{domain}",
-            "{first}{last}@{domain}",
-            "{f}{last}@{domain}",
-            "{first}@{domain}",
-        ]
+# ================= CONFIG =================
+st.set_page_config(page_title="OSINT Lead Finder", layout="wide")
 
-    # ---------------- PARSE INPUT ----------------
+
+# ================= ENGINE =================
+class LeadFinder:
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+
+    # -------- INPUT PARSING --------
     def parse_input(self, query):
         query = query.strip()
-
-        if not query:
-            return "", ""
 
         if "." in query:
             domain = self.clean_domain(query)
@@ -39,20 +35,33 @@ class LeadFinder:
                 .replace("www.", "")
                 .strip("/"))
 
-    # ---------------- NAME EXTRACTION ----------------
+    # -------- GOOGLE SEARCH --------
+    def google_search(self, query):
+        params = {
+            "engine": "google",
+            "q": query,
+            "api_key": self.api_key,
+            "num": 10
+        }
+
+        search = GoogleSearch(params)
+        results = search.get_dict()
+
+        return results.get("organic_results", [])
+
+    # -------- NAME EXTRACTION --------
     def extract_name(self, text):
         text = re.sub(r'\|.*', '', text)
         text = re.sub(r'at .*', '', text, flags=re.I)
 
-        words = text.split()
-        words = [w for w in words if w.isalpha()]
+        words = [w for w in text.split() if w.isalpha()]
 
         if len(words) >= 2:
             return f"{words[0].title()} {words[1].title()}"
 
         return None
 
-    # ---------------- ROLE DETECTION ----------------
+    # -------- ROLE DETECTION --------
     def extract_role(self, text):
         text = text.lower()
 
@@ -67,153 +76,123 @@ class LeadFinder:
 
         return "Decision Maker"
 
-    # ---------------- SEARCH ----------------
+    # -------- MAIN LOGIC --------
     def find_leads(self, company):
         leads = []
 
         queries = [
-            f"{company} CEO",
-            f"{company} founder",
-            f"{company} leadership team",
-            f"{company} linkedin",
-            f'site:linkedin.com "{company}"',
+            f"{company} CEO linkedin",
+            f"{company} founder linkedin",
+            f"{company} CTO linkedin",
+            f"{company} director linkedin",
         ]
 
-        with DDGS() as ddgs:
-            for q in queries:
-                try:
-                    results = list(ddgs.text(q, max_results=15))
+        for query in queries:
+            results = self.google_search(query)
 
-                    for r in results:
-                        title = r.get("title", "")
-                        snippet = r.get("body", "")
-                        link = r.get("href", "")
+            for r in results:
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")
+                link = r.get("link", "")
 
-                        combined = f"{title} {snippet}".lower()
+                combined = f"{title} {snippet}".lower()
 
-                        # relaxed filtering
-                        score = fuzz.partial_ratio(company.lower(), combined)
+                score = fuzz.partial_ratio(company.lower(), combined)
 
-                        if score < 25:
-                            continue
-
-                        name = self.extract_name(title)
-                        if not name:
-                            continue
-
-                        role = self.extract_role(combined)
-
-                        leads.append({
-                            "Name": name,
-                            "Role": role,
-                            "Source": link,
-                            "Score": score
-                        })
-
-                    time.sleep(random.uniform(0.5, 1.2))
-
-                except Exception:
+                # relaxed filtering
+                if score < 20:
                     continue
+
+                name = self.extract_name(title)
+                if not name:
+                    continue
+
+                role = self.extract_role(combined)
+
+                leads.append({
+                    "Name": name,
+                    "Role": role,
+                    "Source": link
+                })
+
+            time.sleep(0.5)
 
         # remove duplicates
         unique = {}
-        for l in leads:
-            if l["Name"] not in unique:
-                unique[l["Name"]] = l
+        for lead in leads:
+            if lead["Name"] not in unique:
+                unique[lead["Name"]] = lead
 
         return list(unique.values())
 
-    # ---------------- EMAIL ----------------
-    def generate_email(self, name, domain):
+    # -------- EMAIL GENERATION --------
+    def generate_emails(self, name, domain):
         if not domain:
             return ["No domain"]
 
         parts = name.lower().split()
         if len(parts) < 2:
-            return ["Invalid name"]
+            return ["Invalid"]
 
-        first, last = parts[0], parts[-1]
+        first = parts[0]
+        last = parts[-1]
         f = first[0]
 
-        return [
-            p.format(first=first, last=last, f=f, domain=domain)
-            for p in self.email_patterns
+        patterns = [
+            f"{first}.{last}@{domain}",
+            f"{first}{last}@{domain}",
+            f"{f}{last}@{domain}",
+            f"{first}@{domain}"
         ]
 
-    # ---------------- MANUAL LINK PARSER ----------------
-    def parse_linkedin(self, url):
-        slug = url.split("/in/")[-1].strip("/")
-
-        parts = re.split(r'[-_]', slug)
-        parts = [p for p in parts if p.isalpha()]
-
-        if len(parts) >= 2:
-            return f"{parts[0].title()} {parts[1].title()}"
-
-        return None
+        return patterns
 
 
-# ====================== UI ======================
-st.set_page_config(page_title="OSINT Lead Finder", layout="wide")
-st.title("🚀 OSINT Lead Finder (Fixed Version)")
+# ================= UI =================
+st.title("🚀 OSINT Lead Finder (Google Powered)")
 
-query = st.text_input("Company or Domain")
-
-engine = LeadFinder()
+api_key = st.text_input("SerpAPI Key", type="password")
+query = st.text_input("Company Name or Domain")
 
 if st.button("Search"):
+
+    if not api_key:
+        st.error("Enter your SerpAPI key")
+        st.stop()
+
+    if not query:
+        st.error("Enter company name or domain")
+        st.stop()
+
+    engine = LeadFinder(api_key)
+
     company, domain = engine.parse_input(query)
 
     st.write(f"Searching for: {company}")
 
-    with st.spinner("Searching..."):
+    with st.spinner("Fetching data from Google..."):
         leads = engine.find_leads(company)
 
     if leads:
-        results = []
-
-        for l in leads:
-            emails = engine.generate_email(l["Name"], domain)
-
-            results.append({
-                "Name": l["Name"],
-                "Role": l["Role"],
-                "Emails": ", ".join(emails),
-                "Source": l["Source"]
-            })
-
-        df = pd.DataFrame(results)
-        st.success(f"Found {len(df)} leads")
-        st.dataframe(df)
-
-    else:
-        st.warning("No leads found. Try manual links below.")
-
-
-# ====================== MANUAL ======================
-st.divider()
-st.subheader("Manual LinkedIn Input")
-
-manual = st.text_area("Paste LinkedIn URLs")
-
-if st.button("Process Links"):
-    if manual.strip():
         rows = []
 
-        for url in manual.split("\n"):
-            name = engine.parse_linkedin(url.strip())
+        for lead in leads:
+            emails = engine.generate_emails(lead["Name"], domain)
 
-            if name:
-                rows.append({
-                    "Name": name,
-                    "Source": url
-                })
+            rows.append({
+                "Name": lead["Name"],
+                "Role": lead["Role"],
+                "Emails": ", ".join(emails),
+                "Source": lead["Source"]
+            })
 
-        if rows:
-            df = pd.DataFrame(rows)
-            st.success("Extracted names from links")
-            st.dataframe(df)
-        else:
-            st.error("Could not extract names")
+        df = pd.DataFrame(rows)
+
+        st.success(f"Found {len(df)} leads")
+        st.dataframe(df, use_container_width=True)
+
+        csv = df.to_csv(index=False).encode()
+        st.download_button("Download CSV", csv, "leads.csv")
+
     else:
-        st.warning("Paste links first")
+        st.warning("No leads found. Try a different company or use LinkedIn manually.")
