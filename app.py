@@ -10,14 +10,9 @@ class OSINTLeadEngine:
     def __init__(self):
 
         self.roles = [
-            "CEO", "Chief Executive Officer",
-            "Founder", "Co-Founder", "Owner",
+            "CEO", "Founder", "Owner",
             "Managing Director", "Director",
-            "Head", "Head of Marketing", "Head of Growth",
-            "CMO", "CTO", "CIO",
-            "VP", "Vice President",
-            "Marketing Manager", "Growth Manager",
-            "Product Manager", "Business Development"
+            "Head", "VP", "Chief"
         ]
 
         self.patterns = [
@@ -26,9 +21,6 @@ class OSINTLeadEngine:
             "{f}{last}@{domain}",
             "{first}@{domain}",
             "{first}_{last}@{domain}",
-            "{last}.{first}@{domain}",
-            "{first}{l}@{domain}",
-            "{f}.{last}@{domain}"
         ]
 
     # -------- INPUT PARSER --------
@@ -42,13 +34,16 @@ class OSINTLeadEngine:
             company = user_input
             domain = ""
 
+        base = company.split()[0]
+
         variations = list(set([
             company,
+            base,
             company.replace(" technologies", ""),
             company.replace(" tech", ""),
             company.replace(" solutions", ""),
             company.replace(" pvt ltd", ""),
-            company.replace(" private limited", "")
+            company.replace(" private limited", ""),
         ]))
 
         return company, domain, variations
@@ -62,33 +57,32 @@ class OSINTLeadEngine:
         )
 
     # -------- QUERY BUILDER --------
-    def build_queries(self, company, domain, variations):
-        role_query = " OR ".join([f'"{r}"' for r in self.roles])
+    def build_queries(self, variations, domain):
         queries = []
 
         for name in variations:
             queries.extend([
-                f'site:linkedin.com/in "{name}" ({role_query})',
+                f'site:linkedin.com/in "{name}" ("CEO" OR "Founder" OR "Director")',
                 f'site:linkedin.com/in "{name}"',
-                f'"{name}" ("CEO" OR "Founder" OR "Director")',
+                f'"{name}" CEO',
+                f'"{name}" founder',
+                f'"{name}" director',
                 f'"{name}" "our team"',
-                f'"{name}" "leadership"',
-                f'"{name}" "CEO said"',
+                f'"{name}" company',
             ])
 
         if domain:
             queries.extend([
+                f'"@{domain}"',
                 f'site:{domain} ("team" OR "about")',
-                f'"@{domain}" ("CEO" OR "Founder")',
-                f'site:{domain} filetype:pdf ("CEO" OR "Director")'
             ])
 
-        return queries
+        return list(set(queries))
 
     # -------- ROLE EXTRACTION --------
     def extract_role(self, text):
         match = re.findall(
-            r"(CEO|Founder|Director|Head|Manager|VP|Chief|Owner)",
+            r"(CEO|Founder|Director|Head|VP|Chief|Owner)",
             text,
             re.I
         )
@@ -97,24 +91,24 @@ class OSINTLeadEngine:
     # -------- LEAD FINDER --------
     def find_leads(self, company, domain, variations):
         leads = []
-        queries = self.build_queries(company, domain, variations)
+        queries = self.build_queries(variations, domain)
 
-        try:
-            with DDGS() as ddgs:
-                for query in queries:
+        with DDGS() as ddgs:
+            for query in queries:
+                try:
                     results = ddgs.text(query, max_results=10)
 
                     for r in results:
+                        link = r.get("href")
                         title = r.get("title", "")
                         snippet = r.get("body", "")
-                        link = r.get("href")
 
                         if not link or "linkedin.com/in" not in link:
                             continue
 
                         combined = f"{title} {snippet}".lower()
 
-                        if fuzz.partial_ratio(company, combined) > 50:
+                        if fuzz.partial_ratio(company, combined) > 40:
 
                             name = re.split(r"[-|,]", title)[0].strip()
 
@@ -124,98 +118,107 @@ class OSINTLeadEngine:
                                 leads.append({
                                     "Full Name": name,
                                     "Role": role,
-                                    "Source": link,
-                                    "Snippet": snippet
+                                    "Source": link
                                 })
 
-                    time.sleep(0.5)
+                    time.sleep(0.3)
 
-        except Exception as e:
-            st.error(f"Search Error: {e}")
+                except:
+                    continue
+
+        # ===== FALLBACK (CRITICAL FIX) =====
+        if not leads:
+            st.warning("No decision-makers found → switching to employee discovery")
+
+            fallback_queries = [
+                f'site:linkedin.com/in "{company}"',
+                f'"{company}" linkedin',
+            ]
+
+            with DDGS() as ddgs:
+                for query in fallback_queries:
+                    try:
+                        results = ddgs.text(query, max_results=15)
+
+                        for r in results:
+                            link = r.get("href")
+                            title = r.get("title", "")
+
+                            if not link or "linkedin.com/in" not in link:
+                                continue
+
+                            name = re.split(r"[-|,]", title)[0].strip()
+
+                            if 2 <= len(name.split()) <= 4:
+                                leads.append({
+                                    "Full Name": name,
+                                    "Role": "Employee",
+                                    "Source": link
+                                })
+
+                    except:
+                        continue
 
         # Deduplicate
         unique = {l["Full Name"]: l for l in leads}
 
-        priority = {
-            "CEO": 1, "Founder": 1, "Owner": 1, "Chief": 1,
-            "Director": 2, "VP": 3, "Head": 3, "Manager": 4
-        }
-
-        sorted_leads = sorted(
-            unique.values(),
-            key=lambda x: priority.get(x["Role"], 5)
-        )
-
-        return sorted_leads
+        return list(unique.values())
 
     # -------- EMAIL GENERATOR --------
     def generate_email(self, full_name, domain):
+        if not domain:
+            return ["No domain"]
+
         parts = full_name.lower().split()
 
-        if len(parts) < 2 or not domain:
-            return ["Not enough data"]
+        if len(parts) < 2:
+            return ["Invalid name"]
 
         first = parts[0]
         last = parts[-1]
 
         return [
-            p.format(
-                first=first,
-                last=last,
-                f=first[0],
-                l=last[0],
-                domain=domain
-            )
+            p.format(first=first, last=last, f=first[0], domain=domain)
             for p in self.patterns
         ]
 
 
 # ================= STREAMLIT UI =================
-st.set_page_config(page_title="OSINT Lead Engine PRO", layout="wide")
-
+st.set_page_config(layout="wide")
 st.title("🚀 OSINT Decision-Maker Finder")
-st.markdown("Find CEOs, founders, and key decision-makers using advanced dorking.")
 
-query_input = st.text_input(
-    "Company Name or Domain",
-    placeholder="e.g. tesla OR tesla.com"
-)
+query = st.text_input("Company Name or Domain")
 
-if st.button("Run Scan", type="primary"):
+if st.button("Run Scan"):
 
-    if not query_input:
-        st.error("Enter a company or domain.")
+    if not query:
+        st.error("Enter something useful.")
     else:
         engine = OSINTLeadEngine()
 
-        company, domain, variations = engine.parse_input(query_input)
+        company, domain, variations = engine.parse_input(query)
 
-        with st.status("Running OSINT Scan...", expanded=True):
-
+        with st.spinner("Scanning internet like a responsible stalker..."):
             leads = engine.find_leads(company, domain, variations)
 
-            if not leads:
-                st.warning("No leads found. Try broader keywords.")
-            else:
-                results = []
+        if not leads:
+            st.error("Still nothing found. Either ultra-small company or invisible online.")
+        else:
+            results = []
 
-                for lead in leads:
-                    emails = engine.generate_email(
-                        lead["Full Name"],
-                        domain
-                    )
+            for lead in leads:
+                emails = engine.generate_email(lead["Full Name"], domain)
 
-                    results.append({
-                        "Name": lead["Full Name"],
-                        "Role": lead["Role"],
-                        "Source": lead["Source"],
-                        "Top Email Guesses": ", ".join(emails[:3])
-                    })
+                results.append({
+                    "Name": lead["Full Name"],
+                    "Role": lead["Role"],
+                    "Source": lead["Source"],
+                    "Email Guess": ", ".join(emails[:2])
+                })
 
-                df = pd.DataFrame(results)
+            df = pd.DataFrame(results)
 
-                st.success(f"Found {len(df)} decision-makers")
-                st.dataframe(df, use_container_width=True, hide_index=True)
+            st.success(f"Found {len(df)} leads")
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
-# ================= FOOTER =================
-st.info("⚠️ Emails are pattern-based guesses. Verify before use.")
+st.info("⚠️ Emails are guesses. Verify before using.")
