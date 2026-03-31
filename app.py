@@ -8,7 +8,7 @@ import time
 from rapidfuzz import fuzz
 
 # ================= CONFIG =================
-st.set_page_config(page_title="Smart Lead Finder", layout="wide")
+st.set_page_config(page_title="Precision Lead Finder", layout="wide")
 
 
 # ================= ENGINE =================
@@ -36,50 +36,46 @@ class LeadFinder:
 
     # -------- COMPANY VARIATIONS --------
     def generate_company_variations(self, company):
-        base = company.lower()
-
         variations = [
             company,
             company.replace("realestate", "real estate"),
             company.replace("realestate", "realty"),
             company.replace("realestate", ""),
         ]
-
         return list(set([v.strip() for v in variations if v.strip()]))
 
-    # -------- GOOGLE SEARCH --------
-    def google_search(self, query):
+    # -------- SEARCH (Google + fallback) --------
+    def search(self, query):
         headers = {"User-Agent": "Mozilla/5.0"}
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&num=10"
 
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.text, "html.parser")
 
-        results = []
+            results = []
+            for g in soup.find_all("div", class_="tF2Cxc"):
+                title = g.find("h3")
+                link = g.find("a")
+                snippet = g.find("span", class_="aCOpRe")
 
-        for g in soup.find_all("div", class_="tF2Cxc"):
-            title = g.find("h3")
-            link = g.find("a")
-            snippet = g.find("span", class_="aCOpRe")
+                results.append({
+                    "title": title.get_text() if title else "",
+                    "link": link["href"] if link else "",
+                    "snippet": snippet.get_text() if snippet else ""
+                })
 
-            results.append({
-                "title": title.get_text() if title else "",
-                "link": link["href"] if link else "",
-                "snippet": snippet.get_text() if snippet else ""
-            })
+            if results:
+                return results
+        except:
+            pass
 
-        return results
-
-    # -------- DUCKDUCKGO --------
-    def ddg_search(self, query):
+        # fallback DDG
         url = "https://html.duckduckgo.com/html/"
-        headers = {"User-Agent": "Mozilla/5.0"}
-
         response = requests.post(url, headers=headers, data={"q": query})
         soup = BeautifulSoup(response.text, "html.parser")
 
         results = []
-
         for r in soup.find_all("div", class_="result"):
             a = r.find("a", class_="result__a")
             snippet = r.find("a", class_="result__snippet")
@@ -92,18 +88,7 @@ class LeadFinder:
 
         return results
 
-    # -------- SEARCH --------
-    def search(self, query):
-        try:
-            results = self.google_search(query)
-            if results:
-                return results
-        except:
-            pass
-
-        return self.ddg_search(query)
-
-    # -------- NAME EXTRACTION --------
+    # -------- NAME --------
     def extract_name(self, text):
         text = re.sub(r'\|.*', '', text)
         text = re.sub(r'-.*', '', text)
@@ -113,9 +98,11 @@ class LeadFinder:
         if match:
             name = match[0]
 
-            # reject junk
             blacklist = ["Real Estate", "Team", "Profile", "Services", "Homes", "About"]
             if any(b.lower() in name.lower() for b in blacklist):
+                return None
+
+            if len(name.split()) < 2:
                 return None
 
             return name
@@ -125,42 +112,14 @@ class LeadFinder:
     # -------- ROLE --------
     def extract_role(self, text):
         text = text.lower()
-        roles = ["ceo", "founder", "cto", "director", "vp", "head", "chief", "owner"]
 
-        for r in roles:
+        valid_roles = ["ceo", "founder", "owner", "director", "principal", "broker"]
+
+        for r in valid_roles:
             if r in text:
                 return r.upper()
 
-        return "Decision Maker"
-
-    # -------- SOURCE TYPE --------
-    def classify_source(self, link, company):
-        if "linkedin.com/in" in link:
-            return "LinkedIn"
-        elif company.lower() in link.lower():
-            return "Company"
-        else:
-            return "Other"
-
-    # -------- EMAIL --------
-    def generate_emails(self, name, domain):
-        if not domain:
-            return ["No domain"]
-
-        parts = name.lower().split()
-        if len(parts) < 2:
-            return ["Invalid"]
-
-        first = parts[0]
-        last = parts[-1]
-        f = first[0]
-
-        return [
-            f"{first}.{last}@{domain}",
-            f"{first}{last}@{domain}",
-            f"{f}{last}@{domain}",
-            f"{first}@{domain}"
-        ]
+        return None
 
     # -------- MAIN --------
     def find_leads(self, company):
@@ -172,13 +131,17 @@ class LeadFinder:
         for v in variations:
             dorks.extend([
                 f'site:linkedin.com/in "{v}" ("CEO" OR "Founder" OR "Owner")',
-                f'site:linkedin.com/in "{v}" ("Director" OR "VP" OR "Head")',
-                f'site:linkedin.com/in "{v}"',
+                f'site:linkedin.com/in "{v}" ("Director" OR "Broker")',
                 f'{v} CEO',
                 f'{v} founder',
-                f'{v} team',
-                f'{v} leadership',
+                f'{v} broker',
+                f'{v} leadership'
             ])
+
+        blacklist_words = [
+            "wikipedia", "news", "timeline", "history",
+            "article", "press", "school", "encyclopedia"
+        ]
 
         for dork in dorks:
             results = self.search(dork)
@@ -190,18 +153,23 @@ class LeadFinder:
 
                 combined = f"{title} {snippet}".lower()
 
-                source_type = self.classify_source(link, company)
+                # ❌ remove junk pages
+                if any(b in combined for b in blacklist_words):
+                    continue
 
-                # LinkedIn always allowed
-                if source_type != "LinkedIn":
-                    if fuzz.partial_ratio(company.lower(), combined) < 10:
-                        continue
+                # ✅ must match company variation
+                if not any(v.lower() in combined for v in variations):
+                    continue
 
                 name = self.extract_name(title)
                 if not name:
                     continue
 
                 role = self.extract_role(combined)
+                if not role:
+                    continue
+
+                source_type = "LinkedIn" if "linkedin.com/in" in link else "Other"
 
                 leads.append({
                     "Name": name,
@@ -212,18 +180,11 @@ class LeadFinder:
 
             time.sleep(2)
 
-        # -------- SMART DEDUP --------
+        # -------- DEDUP --------
         unique = {}
-        priority = {"LinkedIn": 3, "Company": 2, "Other": 1}
-
         for lead in leads:
-            key = lead["Name"]
-
-            if key not in unique:
-                unique[key] = lead
-            else:
-                if priority[lead["Type"]] > priority[unique[key]["Type"]]:
-                    unique[key] = lead
+            if lead["Name"] not in unique:
+                unique[lead["Name"]] = lead
 
         leads = list(unique.values())
 
@@ -240,14 +201,14 @@ class LeadFinder:
 
 
 # ================= UI =================
-st.title("🚀 Smart Lead Finder (Finally Works Edition)")
+st.title("🎯 Precision Lead Finder (No Garbage Edition)")
 
 query = st.text_input("Company Name or Domain")
 
 if st.button("Search"):
 
     if not query:
-        st.error("Enter company name or domain")
+        st.error("Enter company name")
         st.stop()
 
     engine = LeadFinder()
@@ -255,30 +216,19 @@ if st.button("Search"):
 
     st.write(f"Searching for: {company}")
 
-    with st.spinner("Finding real decision makers..."):
+    with st.spinner("Filtering out nonsense..."):
         leads = engine.find_leads(company)
 
     rows = []
-
     for lead in leads:
-        emails = engine.generate_emails(lead["Name"], domain)
-
         rows.append({
             "Name": lead["Name"],
             "Role": lead["Role"],
             "Type": lead["Type"],
-            "Emails": ", ".join(emails),
             "Source": lead["Source"]
         })
 
     df = pd.DataFrame(rows)
 
-    # sort by best source
-    df["Priority"] = df["Type"].map({"LinkedIn": 1, "Company": 2, "Other": 3})
-    df = df.sort_values(by="Priority").drop(columns=["Priority"])
-
-    st.success(f"Found {len(df)} leads")
+    st.success(f"Found {len(df)} relevant leads")
     st.dataframe(df, use_container_width=True)
-
-    csv = df.to_csv(index=False).encode()
-    st.download_button("Download CSV", csv, "leads.csv")
