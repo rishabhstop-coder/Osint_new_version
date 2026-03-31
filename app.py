@@ -8,7 +8,7 @@ import time
 from rapidfuzz import fuzz
 
 # ================= CONFIG =================
-st.set_page_config(page_title="LinkedIn Lead Finder", layout="wide")
+st.set_page_config(page_title="Smart Lead Finder", layout="wide")
 
 
 # ================= ENGINE =================
@@ -113,8 +113,8 @@ class LeadFinder:
         if match:
             name = match[0]
 
-            # remove fake names
-            blacklist = ["Real Estate", "Team", "Profile", "Services", "Homes"]
+            # reject junk
+            blacklist = ["Real Estate", "Team", "Profile", "Services", "Homes", "About"]
             if any(b.lower() in name.lower() for b in blacklist):
                 return None
 
@@ -132,6 +132,15 @@ class LeadFinder:
                 return r.upper()
 
         return "Decision Maker"
+
+    # -------- SOURCE TYPE --------
+    def classify_source(self, link, company):
+        if "linkedin.com/in" in link:
+            return "LinkedIn"
+        elif company.lower() in link.lower():
+            return "Company"
+        else:
+            return "Other"
 
     # -------- EMAIL --------
     def generate_emails(self, name, domain):
@@ -164,7 +173,11 @@ class LeadFinder:
             dorks.extend([
                 f'site:linkedin.com/in "{v}" ("CEO" OR "Founder" OR "Owner")',
                 f'site:linkedin.com/in "{v}" ("Director" OR "VP" OR "Head")',
-                f'site:linkedin.com/in "{v}"'
+                f'site:linkedin.com/in "{v}"',
+                f'{v} CEO',
+                f'{v} founder',
+                f'{v} team',
+                f'{v} leadership',
             ])
 
         for dork in dorks:
@@ -175,11 +188,14 @@ class LeadFinder:
                 snippet = r.get("snippet", "")
                 link = r.get("link", "")
 
-                # STRICT LinkedIn only
-                if "linkedin.com/in" not in link:
-                    continue
-
                 combined = f"{title} {snippet}".lower()
+
+                source_type = self.classify_source(link, company)
+
+                # LinkedIn always allowed
+                if source_type != "LinkedIn":
+                    if fuzz.partial_ratio(company.lower(), combined) < 10:
+                        continue
 
                 name = self.extract_name(title)
                 if not name:
@@ -190,17 +206,24 @@ class LeadFinder:
                 leads.append({
                     "Name": name,
                     "Role": role,
-                    "Type": "LinkedIn",
+                    "Type": source_type,
                     "Source": link
                 })
 
             time.sleep(2)
 
-        # -------- DEDUP --------
+        # -------- SMART DEDUP --------
         unique = {}
+        priority = {"LinkedIn": 3, "Company": 2, "Other": 1}
+
         for lead in leads:
-            if lead["Name"] not in unique:
-                unique[lead["Name"]] = lead
+            key = lead["Name"]
+
+            if key not in unique:
+                unique[key] = lead
+            else:
+                if priority[lead["Type"]] > priority[unique[key]["Type"]]:
+                    unique[key] = lead
 
         leads = list(unique.values())
 
@@ -217,7 +240,7 @@ class LeadFinder:
 
 
 # ================= UI =================
-st.title(" LinkedIn Lead Finder)")
+st.title("🚀 Smart Lead Finder (Finally Works Edition)")
 
 query = st.text_input("Company Name or Domain")
 
@@ -232,7 +255,7 @@ if st.button("Search"):
 
     st.write(f"Searching for: {company}")
 
-    with st.spinner("Finding actual humans (not fake entries)..."):
+    with st.spinner("Finding real decision makers..."):
         leads = engine.find_leads(company)
 
     rows = []
@@ -250,7 +273,11 @@ if st.button("Search"):
 
     df = pd.DataFrame(rows)
 
-    st.success(f"Found {len(df)} real leads")
+    # sort by best source
+    df["Priority"] = df["Type"].map({"LinkedIn": 1, "Company": 2, "Other": 3})
+    df = df.sort_values(by="Priority").drop(columns=["Priority"])
+
+    st.success(f"Found {len(df)} leads")
     st.dataframe(df, use_container_width=True)
 
     csv = df.to_csv(index=False).encode()
